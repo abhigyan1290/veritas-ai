@@ -34,6 +34,7 @@ Streaming (async):
 Note: stream_options is injected automatically and transparently.
       The caller's code does not change at all.
 """
+import asyncio
 import time
 
 from veritas.client import _emit_event, _get_commit
@@ -127,7 +128,7 @@ class _CompletionsProxy:
 
         response = await self._original_completions.create(*args, **kwargs)
         latency_ms = (time.time() - start_time) * 1000
-        _track_from_completion(response, self._feature_name, model, latency_ms, commit)
+        await asyncio.to_thread(_track_from_completion, response, self._feature_name, model, latency_ms, commit)
         return response
 
 
@@ -153,20 +154,28 @@ class _OpenAISyncStream:
     def __iter__(self):
         tokens_in = 0
         tokens_out = 0
-        for chunk in self._stream:
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                tokens_in = getattr(usage, "prompt_tokens", 0) or 0
-                tokens_out = getattr(usage, "completion_tokens", 0) or 0
-            yield chunk
-        _emit_event(
-            feature_name=self._feature_name,
-            model=self._model,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            latency_ms=(time.time() - self._start_time) * 1000,
-            commit_hash=self._commit,
-        )
+        status = "ok"
+        try:
+            for chunk in self._stream:
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    tokens_in = getattr(usage, "prompt_tokens", 0) or 0
+                    tokens_out = getattr(usage, "completion_tokens", 0) or 0
+                yield chunk
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            # Always emit — covers normal exhaustion, exceptions, and cancellation.
+            _emit_event(
+                feature_name=self._feature_name,
+                model=self._model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=(time.time() - self._start_time) * 1000,
+                commit_hash=self._commit,
+                status=status,
+            )
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -190,20 +199,28 @@ class _OpenAIAsyncStream:
     async def _iterate(self):
         tokens_in = 0
         tokens_out = 0
-        async for chunk in self._stream:
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                tokens_in = getattr(usage, "prompt_tokens", 0) or 0
-                tokens_out = getattr(usage, "completion_tokens", 0) or 0
-            yield chunk
-        _emit_event(
-            feature_name=self._feature_name,
-            model=self._model,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            latency_ms=(time.time() - self._start_time) * 1000,
-            commit_hash=self._commit,
-        )
+        status = "ok"
+        try:
+            async for chunk in self._stream:
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    tokens_in = getattr(usage, "prompt_tokens", 0) or 0
+                    tokens_out = getattr(usage, "completion_tokens", 0) or 0
+                yield chunk
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            # Always emit — covers normal exhaustion, exceptions, and cancellation.
+            _emit_event(
+                feature_name=self._feature_name,
+                model=self._model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=(time.time() - self._start_time) * 1000,
+                commit_hash=self._commit,
+                status=status,
+            )
 
     def __getattr__(self, name):
         return getattr(self._stream, name)

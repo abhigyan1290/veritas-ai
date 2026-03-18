@@ -5,6 +5,7 @@ These classes are drop-in replacements that intercept every API call,
 capture cost/latency/token metrics, and emit a CostEvent — silently.
 The host application's code never changes.
 """
+import asyncio
 import time
 from datetime import datetime, timezone
 
@@ -25,6 +26,7 @@ def _emit_event(
     commit_hash: str,
     cache_creation: int = 0,
     cache_read: int = 0,
+    status: str = "ok",
 ):
     """Compute cost and emit a CostEvent to the configured sink. Never raises."""
     try:
@@ -47,6 +49,7 @@ def _emit_event(
             cost_usd=cost,
             estimated=estimated,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            status=status,
         )
         from veritas.core import get_default_sink
         sink = get_default_sink()
@@ -58,7 +61,11 @@ def _emit_event(
 
 
 def _get_commit() -> str:
-    """Resolve the current git commit hash safely."""
+    """Resolve the current git commit hash safely.
+
+    Delegates to ``get_current_commit_hash()`` which handles overrides,
+    env vars, caching, fast-path resolution, and dirty detection.
+    """
     try:
         from veritas.utils import get_current_commit_hash
         return get_current_commit_hash()
@@ -133,7 +140,8 @@ class _AnthropicMessagesProxy:
 
         response = await self._original_messages.create(*args, **kwargs)
         latency_ms = (time.time() - start_time) * 1000
-        self._track_from_response(response, kwargs.get("model", "unknown"), latency_ms, commit)
+        # Push the blocking HTTP emit off the event loop
+        await asyncio.to_thread(self._track_from_response, response, kwargs.get("model", "unknown"), latency_ms, commit)
         return response
 
     def _track_from_response(self, response, model: str, latency_ms: float, commit: str):
@@ -167,27 +175,34 @@ class _AnthropicSyncStream:
         self._tokens_out = 0
 
     def __iter__(self):
-        for event in self._stream:
-            # Capture token counts from stream events
-            etype = getattr(event, "type", None)
-            if etype == "message_start":
-                usage = getattr(getattr(event, "message", None), "usage", None)
-                if usage:
-                    self._tokens_in = getattr(usage, "input_tokens", 0)
-            elif etype == "message_delta":
-                usage = getattr(event, "usage", None)
-                if usage:
-                    self._tokens_out = getattr(usage, "output_tokens", 0)
-            yield event
-        # Stream exhausted — emit event
-        _emit_event(
-            feature_name=self._feature_name,
-            model=self._model,
-            tokens_in=self._tokens_in,
-            tokens_out=self._tokens_out,
-            latency_ms=(time.time() - self._start_time) * 1000,
-            commit_hash=self._commit,
-        )
+        status = "ok"
+        try:
+            for event in self._stream:
+                # Capture token counts from stream events
+                etype = getattr(event, "type", None)
+                if etype == "message_start":
+                    usage = getattr(getattr(event, "message", None), "usage", None)
+                    if usage:
+                        self._tokens_in = getattr(usage, "input_tokens", 0)
+                elif etype == "message_delta":
+                    usage = getattr(event, "usage", None)
+                    if usage:
+                        self._tokens_out = getattr(usage, "output_tokens", 0)
+                yield event
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            # Always emit — covers normal exhaustion, exceptions, and cancellation.
+            _emit_event(
+                feature_name=self._feature_name,
+                model=self._model,
+                tokens_in=self._tokens_in,
+                tokens_out=self._tokens_out,
+                latency_ms=(time.time() - self._start_time) * 1000,
+                commit_hash=self._commit,
+                status=status,
+            )
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -210,25 +225,33 @@ class _AnthropicAsyncStream:
     async def _iterate(self):
         tokens_in = 0
         tokens_out = 0
-        async for event in self._stream:
-            etype = getattr(event, "type", None)
-            if etype == "message_start":
-                usage = getattr(getattr(event, "message", None), "usage", None)
-                if usage:
-                    tokens_in = getattr(usage, "input_tokens", 0)
-            elif etype == "message_delta":
-                usage = getattr(event, "usage", None)
-                if usage:
-                    tokens_out = getattr(usage, "output_tokens", 0)
-            yield event
-        _emit_event(
-            feature_name=self._feature_name,
-            model=self._model,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            latency_ms=(time.time() - self._start_time) * 1000,
-            commit_hash=self._commit,
-        )
+        status = "ok"
+        try:
+            async for event in self._stream:
+                etype = getattr(event, "type", None)
+                if etype == "message_start":
+                    usage = getattr(getattr(event, "message", None), "usage", None)
+                    if usage:
+                        tokens_in = getattr(usage, "input_tokens", 0)
+                elif etype == "message_delta":
+                    usage = getattr(event, "usage", None)
+                    if usage:
+                        tokens_out = getattr(usage, "output_tokens", 0)
+                yield event
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            # Always emit — covers normal exhaustion, exceptions, and cancellation.
+            _emit_event(
+                feature_name=self._feature_name,
+                model=self._model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=(time.time() - self._start_time) * 1000,
+                commit_hash=self._commit,
+                status=status,
+            )
 
     def __getattr__(self, name):
         return getattr(self._stream, name)

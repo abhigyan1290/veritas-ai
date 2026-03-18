@@ -7,6 +7,7 @@ from typing import Tuple
 #   Anthropic: https://docs.anthropic.com/en/docs/about-claude/pricing
 #   OpenAI: https://openai.com/api/pricing
 # Keys match API model identifiers; versioned names resolve via longest-prefix match.
+#TODO: Add api costing
 PRICING_TABLE: dict[str, Tuple[float, float, float, float]] = {
     # (input_per_1m, output_per_1m, cache_write_per_1m, cache_read_per_1m)
 

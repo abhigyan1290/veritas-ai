@@ -3,7 +3,7 @@
 import argparse
 import sys
 from veritas.sinks import SQLiteSink
-from veritas.engine import compare_commits, _compute_averages
+from veritas.engine import compare_commits, _compute_averages, strip_dirty_suffix
 
 
 def _format_money(usd: float) -> str:
@@ -42,11 +42,21 @@ def _render_table(headers: list[str], rows: list[list[str]]) -> str:
 def run_diff(args):
     """Run the diff command to compare two commits."""
     # Note: args.commit_a and args.commit_b are bounded by explicit `dest` overrides
-    print(f"Comparing feature '{args.feature}' between ({args.commit_a}) and ({args.commit_b})...\\n")
+    include_dirty = getattr(args, "include_dirty", False)
+    dirty_note = " (including +dirty events)" if include_dirty else ""
+    print(f"Comparing feature '{args.feature}' between ({args.commit_a}) and ({args.commit_b}){dirty_note}...\\n")
 
     sink = SQLiteSink()
+    # Parse tags list back into a dict
+    tags_dict = {}
+    if getattr(args, "tag", None):
+        for t in args.tag:
+            if "=" in t:
+                k, v = t.split("=", 1)
+                tags_dict[k] = v
+
     try:
-        res = compare_commits(sink, args.feature, args.commit_a, args.commit_b)
+        res = compare_commits(sink, args.feature, args.commit_a, args.commit_b, include_dirty=include_dirty, tags=tags_dict or None)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -125,6 +135,19 @@ def main():
     diff_parser.add_argument("--feature", required=True, help="Feature name to filter by.")
     diff_parser.add_argument("--from", dest="commit_a", required=True, help="Base commit hash.")
     diff_parser.add_argument("--to", dest="commit_b", required=True, help="Target commit hash.")
+    diff_parser.add_argument(
+        "--include-dirty",
+        dest="include_dirty",
+        action="store_true",
+        default=False,
+        help="Include events from +dirty (uncommitted) code versions in comparison.",
+    )
+    diff_parser.add_argument(
+        "--tag",
+        "-t",
+        action="append",
+        help="Filter by tag (format: key=value). Can be used multiple times.",
+    )
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="View aggregated metrics for a feature.")

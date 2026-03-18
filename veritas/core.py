@@ -2,7 +2,7 @@
 
 import inspect
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Callable, Optional, TypeVar
 
@@ -29,6 +29,7 @@ class CostEvent:
     timestamp: str
     status: str = "ok"  # "ok" | "error"
     estimated: bool = False  # True when usage/cost was inferred (e.g. missing from API)
+    tags: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict for sinks."""
@@ -45,6 +46,7 @@ class CostEvent:
             "timestamp": self.timestamp,
             "status": self.status,
             "estimated": self.estimated,
+            "tags": self.tags or {},
         }
 
 
@@ -90,6 +92,7 @@ def _extract_usage(response) -> tuple[str, int, int, int, int]:
 def track(
     feature: str,
     sink: Optional[BaseSink] = None,
+    tags: Optional[dict[str, str]] = None,
 ) -> Callable[[F], F]:
     """Decorator to track AI API calls and emit cost events.
 
@@ -134,6 +137,7 @@ def track(
                         timestamp=utc_now_iso(),
                         status="ok",
                         estimated=estimated,
+                        tags=tags,
                     )
                     used_sink.emit(event)
                     return result
@@ -153,6 +157,7 @@ def track(
                         timestamp=utc_now_iso(),
                         status="error",
                         estimated=True,
+                        tags=tags,
                     )
                     used_sink.emit(event)
                     raise
@@ -188,6 +193,7 @@ def track(
                     timestamp=utc_now_iso(),
                     status="ok",
                     estimated=estimated,
+                    tags=tags,
                 )
                 used_sink.emit(event)
                 return result
@@ -207,6 +213,7 @@ def track(
                     timestamp=utc_now_iso(),
                     status="error",
                     estimated=True,
+                    tags=tags,
                 )
                 used_sink.emit(event)
                 raise
